@@ -1,0 +1,29 @@
+# Vídeos instrucionais (grandes arquivos)
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# Arquivos de legendas de trabalho
+*.srt
+*.vtt
+
+# Checkpoints temporários de tradução
+.*.checkpoint.json
+*.checkpoint.json
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Ambientes virtuais
+.env
+.venv
+env/
+venv/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
