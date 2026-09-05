@@ -107,6 +107,7 @@ Você pode passar todos os argumentos diretamente pela linha de comando:
 | `--max-chars` | Limite de caracteres por linha para alinhamento | `45` (faixa 42 a 48) |
 | `--batch-size` | Quantidade de legendas enviadas por lote ao LLM | `10` |
 | `--dry-run N` | Traduz apenas as primeiras `N` legendas para teste | Desativado |
+| `-f`, `--overwrite` | Sobrescreve arquivos já traduzidos em vez de pulá-los | Desativado |
 | `--no-resume` | Ignora checkpoints anteriores e recomeça do zero | Desativado |
 | `--no-reformat` | Não formata/alinha as quebras de linha | Desativado |
 | `--interactive` | Força a exibição do menu interativo no terminal | Desativado |

@@ -472,6 +472,7 @@ class SubtitleTranslator:
         input_file: Path,
         output_file: Path,
         resume: bool = True,
+        overwrite: bool = False,
         dry_run_limit: Optional[int] = None
     ) -> bool:
         cues = parse_srt(input_file)
@@ -483,17 +484,67 @@ class SubtitleTranslator:
             cues = cues[:dry_run_limit]
             print_info(f"Modo Dry-Run: limitando tradução às primeiras {len(cues)} legendas.")
 
+        total_cues = len(cues)
+
+        # 1. VERIFICA SE O ARQUIVO DE SAÍDA JÁ EXISTE E ESTÁ COMPLETO
+        if output_file.exists() and not overwrite and not dry_run_limit:
+            try:
+                existing_cues = parse_srt(output_file)
+                if len(existing_cues) >= total_cues and total_cues > 0:
+                    print_success(
+                        f"Arquivo já traduzido e completo: {output_file.name} "
+                        f"({len(existing_cues)}/{total_cues} legendas). Pulando!"
+                    )
+                    print_info("Para forçar a retradução, utilize o parâmetro --overwrite.")
+                    return True
+            except Exception:
+                pass
+
         checkpoint_path = self._get_checkpoint_path(input_file)
         translated_map: Dict[int, str] = {}
 
-        if resume:
+        if resume and not overwrite:
             translated_map = self._load_checkpoint(checkpoint_path)
-            if translated_map:
-                print_info(f"Checkpoint recuperado: {len(translated_map)} legendas já traduzidas previamente.")
 
-        total_cues = len(cues)
+            # Se não houver checkpoint mas o arquivo de saída existir parcialmente, recupera dele
+            if not translated_map and output_file.exists():
+                try:
+                    partial_cues = parse_srt(output_file)
+                    if partial_cues:
+                        translated_map = {c.index: c.text for c in partial_cues if c.text.strip()}
+                        if translated_map:
+                            print_info(f"Recuperadas {len(translated_map)}/{total_cues} legendas do arquivo existente {output_file.name}.")
+                except Exception:
+                    pass
+
+            if translated_map:
+                print_info(f"Progresso recuperado: {len(translated_map)}/{total_cues} legendas já traduzidas previamente.")
+
         cues_to_translate = [c for c in cues if c.index not in translated_map]
-        
+
+        # 2. SE JÁ ESTIVER 100% TRADUZIDO (NO CHECKPOINT OU PARCIAL)
+        if len(cues_to_translate) == 0 and total_cues > 0:
+            print_success(f"Todas as {total_cues} legendas já constam como traduzidas!")
+            # Garante que o arquivo final esteja gravado e formatado
+            if not output_file.exists() or len(parse_srt(output_file)) < total_cues or overwrite:
+                print_info("Gravando arquivo de legenda final formatado...")
+                final_cues: List[SubtitleCue] = []
+                for cue in cues:
+                    pt_text = translated_map.get(cue.index, cue.text)
+                    formatted_text = self.formatter.format_text(pt_text) if self.formatter else pt_text
+                    final_cues.append(SubtitleCue(cue.index, cue.timestamp, formatted_text))
+                write_srt(output_file, final_cues)
+                print_success(f"Legenda final salva com sucesso em: {Colors.BOLD}{output_file}{Colors.RESET}")
+            else:
+                print_info(f"Arquivo {output_file.name} já se encontra atualizado no disco.")
+
+            if checkpoint_path.exists() and not dry_run_limit:
+                try:
+                    checkpoint_path.unlink()
+                except Exception:
+                    pass
+            return True
+
         print_info(f"Arquivo: {input_file.name}")
         print_info(f"Total de legendas: {total_cues} | A traduzir: {len(cues_to_translate)}")
         print_info(f"Modelo: {self.model} | Modo Ollama: {self.client.mode}")
@@ -615,6 +666,8 @@ def interactive_menu(default_dir: str = "/home/joaquim/john") -> Dict[str, Any]:
         input_path = Path(user_input).expanduser().resolve()
 
     selected_files: List[Path] = []
+    overwrite_mode = False
+
     if input_path.is_file():
         if input_path.suffix.lower() != '.srt':
             print_warning(f"O arquivo {input_path.name} não possui extensão .srt, mas será processado como SRT.")
@@ -627,24 +680,75 @@ def interactive_menu(default_dir: str = "/home/joaquim/john") -> Dict[str, Any]:
             print_error(f"Nenhum arquivo .srt encontrado em {input_path}!")
             sys.exit(1)
 
-        print(f"\n{Colors.BOLD}Arquivos SRT encontrados em {input_path}:{Colors.RESET}")
-        print(f"  {Colors.GREEN}[0] Traduzir TODOS os arquivos ({len(source_srts)} arquivos){Colors.RESET}")
-        for i, srt in enumerate(source_srts, 1):
-            print(f"  [{i}] {srt.name}")
+        # Analisa o status de cada arquivo encontrado
+        pending_files = []
+        completed_files = []
+        file_status_info = []
 
-        choice = input(f"\n{Colors.CYAN}Selecione o número do arquivo a traduzir [0]: {Colors.RESET}").strip()
+        for srt in source_srts:
+            pt_file = srt.parent / f"{srt.stem}.pt_BR.srt"
+            ckpt_file = srt.parent / f".{srt.name}.pt_BR.checkpoint.json"
+
+            is_done = False
+            if pt_file.exists():
+                try:
+                    cues_src = parse_srt(srt)
+                    cues_pt = parse_srt(pt_file)
+                    if len(cues_pt) >= len(cues_src) and len(cues_src) > 0:
+                        is_done = True
+                except Exception:
+                    pass
+
+            if is_done:
+                completed_files.append(srt)
+                file_status_info.append(f"{Colors.GREEN}[Concluído ✓]{Colors.RESET}")
+            elif ckpt_file.exists():
+                pending_files.append(srt)
+                try:
+                    with open(ckpt_file, 'r', encoding='utf-8') as cf:
+                        ckpt_data = json.load(cf)
+                    file_status_info.append(f"{Colors.YELLOW}[Em andamento: {len(ckpt_data)} legendas ⏳]{Colors.RESET}")
+                except Exception:
+                    file_status_info.append(f"{Colors.YELLOW}[Em andamento ⏳]{Colors.RESET}")
+            else:
+                pending_files.append(srt)
+                file_status_info.append(f"{Colors.CYAN}[Pendente ⚪]{Colors.RESET}")
+
+        print(f"\n{Colors.BOLD}Arquivos SRT encontrados em {input_path}:{Colors.RESET}")
+        if pending_files:
+            print(f"  {Colors.GREEN}[0] Traduzir APENAS arquivos pendentes/incompletos ({len(pending_files)} de {len(source_srts)}){Colors.RESET}")
+        else:
+            print(f"  {Colors.YELLOW}[0] Todos os {len(source_srts)} arquivos já estão traduzidos!{Colors.RESET}")
+
+        for i, (srt, status) in enumerate(zip(source_srts, file_status_info), 1):
+            print(f"  [{i}] {srt.name:<32} {status}")
+
+        choice = input(f"\n{Colors.CYAN}Selecione o número da opção desejada [0]: {Colors.RESET}").strip()
         if not choice or choice == "0":
-            selected_files = source_srts
+            if pending_files:
+                selected_files = pending_files
+            else:
+                selected_files = source_srts
+                overwrite_mode = True
         else:
             try:
                 idx = int(choice) - 1
                 if 0 <= idx < len(source_srts):
-                    selected_files = [source_srts[idx]]
+                    target_srt = source_srts[idx]
+                    selected_files = [target_srt]
+                    if target_srt in completed_files:
+                        print_warning(f"O arquivo '{target_srt.name}' já possui legenda traduzida completa.")
+                        redo = input(f"{Colors.CYAN}Deseja refazer a tradução deste arquivo do zero? (s/N): {Colors.RESET}").strip().lower()
+                        if redo == 's':
+                            overwrite_mode = True
+                        else:
+                            print_info("Operação cancelada pelo usuário.")
+                            sys.exit(0)
                 else:
-                    print_warning("Opção inválida, processando todos os arquivos.")
-                    selected_files = source_srts
+                    print_warning("Opção inválida, processando arquivos pendentes.")
+                    selected_files = pending_files if pending_files else source_srts
             except ValueError:
-                selected_files = source_srts
+                selected_files = pending_files if pending_files else source_srts
 
     client = OllamaClient()
     available_models = client.list_models()
@@ -680,6 +784,8 @@ def interactive_menu(default_dir: str = "/home/joaquim/john") -> Dict[str, Any]:
     print(f"  • Modo de conexão: {client.mode}")
     print(f"  • Caracteres por linha: {max_chars} (máx 2 linhas)")
     print(f"  • Tamanho do lote: {batch_size}")
+    if overwrite_mode:
+        print(f"  • Modo Sobrescrever: {Colors.YELLOW}Ativado{Colors.RESET}")
 
     confirm = input(f"\n{Colors.BOLD}{Colors.CYAN}Pressione Enter para iniciar a tradução (ou 'q' para cancelar): {Colors.RESET}").strip()
     if confirm.lower() == 'q':
@@ -692,6 +798,7 @@ def interactive_menu(default_dir: str = "/home/joaquim/john") -> Dict[str, Any]:
         "model": model,
         "max_chars": max_chars,
         "batch_size": batch_size,
+        "overwrite": overwrite_mode,
     }
 
 
@@ -735,6 +842,11 @@ def main():
         help="Número de legendas agrupadas por chamada ao modelo LLM (padrão: 10)"
     )
     parser.add_argument(
+        "-f", "--overwrite",
+        action="store_true",
+        help="Sobrescreve e retraduz arquivos de legendas mesmo que já existam completos (.pt_BR.srt)"
+    )
+    parser.add_argument(
         "--no-reformat",
         action="store_true",
         help="Desativa a quebra sintática inteligente de linhas"
@@ -767,6 +879,7 @@ def main():
         batch_size = config["batch_size"]
         reformat = True
         resume = True
+        overwrite = config.get("overwrite", False)
         dry_run = None
     else:
         input_target = args.input or "/home/joaquim/john"
@@ -790,6 +903,7 @@ def main():
         batch_size = args.batch_size
         reformat = not args.no_reformat
         resume = not args.no_resume
+        overwrite = args.overwrite
         dry_run = args.dry_run
 
     if client.mode == "unknown":
@@ -822,6 +936,7 @@ def main():
             input_file=srt_file,
             output_file=output_file,
             resume=resume,
+            overwrite=overwrite,
             dry_run_limit=dry_run
         )
         if not success:
